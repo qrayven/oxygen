@@ -144,12 +144,3 @@ mod test {
         assert_eq!(bytes, bytes_2);
     }
 }
-
-struct CustomJsonSerializer(pub serde_json::value::Serializer);
-
-impl Deref for CustomJsonSerializer {
-    type Target = serde_json::value::Serializer;
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}

@@ -1,5 +1,6 @@
-use std::{cmp::Ordering, collections::HashMap};
+use std::{cmp::Ordering, collections::HashMap, ops::Index};
 
+use anyhow::Context;
 use itertools::Itertools;
 use serde::{
     de::{MapAccess, SeqAccess, Visitor},
@@ -9,7 +10,7 @@ use serde::{
 
 use crate::{
     tri,
-    types::{Bytes, Identifier, StaticBytes, Version},
+    types::{Bytes, Identifier, StaticBytes},
 };
 
 #[derive(Clone, Debug, PartialEq)]
@@ -181,30 +182,33 @@ impl<'de> Deserialize<'de> for DocumentValue {
 }
 
 impl DocumentValue {
-    pub fn get<'a, I: Into<Index<'a>>>(&self, idx: I) -> Option<&DocumentValue> {
+    pub fn get<'a, I: Into<DashValueIndex<'a>>>(&self, idx: I) -> Option<&DocumentValue> {
         let index = idx.into();
         match index {
-            Index::Int(i) => match self {
+            DashValueIndex::Int(i) => match self {
                 DocumentValue::Array(ref a) => a.get(i),
                 _ => None,
             },
 
-            Index::String(w) => match self {
+            DashValueIndex::String(w) => match self {
                 DocumentValue::Map(ref map) => map.get(w),
                 _ => None,
             },
         }
     }
 
-    pub fn get_mut<'a, I: Into<Index<'a>>>(&mut self, idx: I) -> Option<&mut DocumentValue> {
+    pub fn get_mut<'a, I: Into<DashValueIndex<'a>>>(
+        &mut self,
+        idx: I,
+    ) -> Option<&mut DocumentValue> {
         let index = idx.into();
         match index {
-            Index::Int(i) => match self {
+            DashValueIndex::Int(i) => match self {
                 DocumentValue::Array(ref mut a) => a.get_mut(i),
                 _ => None,
             },
 
-            Index::String(w) => match self {
+            DashValueIndex::String(w) => match self {
                 DocumentValue::Map(ref mut map) => map.get_mut(w),
                 _ => None,
             },
@@ -212,19 +216,74 @@ impl DocumentValue {
     }
 }
 
-pub enum Index<'a> {
+pub enum DashValueIndex<'a> {
     String(&'a str),
     Int(usize),
 }
 
-impl<'a> From<&'a str> for Index<'a> {
+impl<'a> From<&'a str> for DashValueIndex<'a> {
     fn from(v: &'a str) -> Self {
         Self::String(v)
     }
 }
 
-impl<'a> From<usize> for Index<'a> {
+impl<'a> From<usize> for DashValueIndex<'a> {
     fn from(v: usize) -> Self {
         Self::Int(v)
+    }
+}
+
+impl<'a, I> Index<I> for DocumentValue
+where
+    I: Into<DashValueIndex<'a>>,
+{
+    type Output = DocumentValue;
+    fn index(&self, index: I) -> &Self::Output {
+        let index: DashValueIndex = index.into();
+        match index {
+            DashValueIndex::Int(idx) => match self {
+                DocumentValue::Array(arr) => &arr[idx],
+                _ => panic!("document value isn't a array"),
+            },
+            DashValueIndex::String(key) => match self {
+                DocumentValue::Map(map) => map.get(key).unwrap(),
+                _ => panic!("document isn't a  map"),
+            },
+        }
+    }
+}
+
+#[cfg(feature = "serde_json_value")]
+impl TryFrom<serde_json::Value> for DocumentValue {
+    type Error = anyhow::Error;
+    fn try_from(value: serde_json::Value) -> Result<Self, Self::Error> {
+        value
+            .serialize(crate::serializer::ToDashValue::default())
+            .context("conversion of serde json value to Dash value failed")
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::DocumentValue;
+    use serde_json::json;
+
+    #[test]
+    fn indexing() {
+        let json_value: DocumentValue = json!({
+            "alpha" : {
+                "bravo" : [
+                    "bravo_value"
+                ]
+            }
+
+        })
+        .try_into()
+        .expect("no error");
+
+        assert_eq!(
+            DocumentValue::String("bravo_value".into()),
+            json_value["alpha"]["bravo"][0]
+        );
     }
 }
