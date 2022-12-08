@@ -1,4 +1,8 @@
-use std::{cmp::Ordering, collections::HashMap, ops::Index};
+use std::{
+    cmp::Ordering,
+    collections::HashMap,
+    ops::{Index, IndexMut},
+};
 
 use anyhow::Context;
 use itertools::Itertools;
@@ -61,8 +65,6 @@ impl Serialize for DocumentValue {
             Self::Map(map) => {
                 let mut m = serializer.serialize_map(Some(map.len()))?;
                 let sorted = map.iter().sorted_by(|a, b| {
-                    // We now for sure that the keys are always text, since `insert()`
-                    // methods accepts only types that can be converted into a string
                     let key_a = a.0.as_bytes();
                     let key_b = b.0.as_bytes();
 
@@ -182,6 +184,42 @@ impl<'de> Deserialize<'de> for DocumentValue {
 }
 
 impl DocumentValue {
+    // Replaces bytes types with [`DocumentValue::Array`], providing an array representation
+    // instead of a String representation in cases where a human-readable Serializer is used.
+    pub fn bytes_as_arrays(mut self) -> DocumentValue {
+        let mut to_walk: Vec<&mut DocumentValue> = vec![&mut self];
+
+        while let Some(value) = to_walk.pop() {
+            match value {
+                Self::Array(ref mut arr) => {
+                    for v in arr.iter_mut() {
+                        if v.is_container() {
+                            to_walk.push(v);
+                            continue;
+                        }
+                        Self::replace_bytes_with_array(v);
+                    }
+                }
+
+                Self::Map(ref mut map) => {
+                    for (_, v) in map.iter_mut() {
+                        if v.is_container() {
+                            to_walk.push(v);
+                            continue;
+                        }
+                        Self::replace_bytes_with_array(v);
+                    }
+                }
+                Self::Identifier(b) => *value = Self::Null,
+                Self::Bytes(b) => *value = Self::Null,
+                Self::StaticBytes(b) => *value = Self::Null,
+                _ => {}
+            }
+        }
+
+        self
+    }
+
     pub fn get<'a, I: Into<DashValueIndex<'a>>>(&self, idx: I) -> Option<&DocumentValue> {
         let index = idx.into();
         match index {
@@ -213,6 +251,41 @@ impl DocumentValue {
                 _ => None,
             },
         }
+    }
+
+    pub fn is_container(&mut self) -> bool {
+        matches!(self, Self::Array(_) | Self::Map(_))
+    }
+
+    fn replace_bytes_with_array(value: &mut DocumentValue) {
+        let owned = std::mem::take(value);
+        match owned {
+            Self::Identifier(id) => {
+                *value = DocumentValue::Array(
+                    id.data
+                        .into_iter()
+                        .map(|v| DocumentValue::UInteger(v as u64))
+                        .collect_vec(),
+                )
+            }
+            Self::Bytes(bytes) => {
+                *value = DocumentValue::Array(
+                    bytes
+                        .0
+                        .into_iter()
+                        .map(|v| DocumentValue::UInteger(v as u64))
+                        .collect_vec(),
+                )
+            }
+            Self::StaticBytes(b) => {
+                *value = DocumentValue::Array(
+                    b.0.into_iter()
+                        .map(|v| DocumentValue::UInteger(v as u64))
+                        .collect_vec(),
+                )
+            }
+            _ => {}
+        };
     }
 }
 
@@ -253,9 +326,29 @@ where
     }
 }
 
+impl<'a, I> IndexMut<I> for DocumentValue
+where
+    I: Into<DashValueIndex<'a>>,
+{
+    fn index_mut(&mut self, index: I) -> &mut Self::Output {
+        let index: DashValueIndex = index.into();
+        match index {
+            DashValueIndex::Int(idx) => match self {
+                DocumentValue::Array(arr) => &mut arr[idx],
+                _ => panic!("document value isn't a array"),
+            },
+            DashValueIndex::String(key) => match self {
+                DocumentValue::Map(map) => map.get_mut(key).unwrap(),
+                _ => panic!("document isn't a  map"),
+            },
+        }
+    }
+}
+
 #[cfg(feature = "serde_json_value")]
 impl TryFrom<serde_json::Value> for DocumentValue {
     type Error = anyhow::Error;
+
     fn try_from(value: serde_json::Value) -> Result<Self, Self::Error> {
         value
             .serialize(crate::serializer::ToDashValue::default())
@@ -265,12 +358,14 @@ impl TryFrom<serde_json::Value> for DocumentValue {
 
 #[cfg(test)]
 mod test {
+    use crate::prelude::Identifier;
+
     use super::DocumentValue;
     use serde_json::json;
 
     #[test]
     fn indexing() {
-        let json_value: DocumentValue = json!({
+        let mut dash_value: DocumentValue = json!({
             "alpha" : {
                 "bravo" : [
                     "bravo_value"
@@ -283,7 +378,13 @@ mod test {
 
         assert_eq!(
             DocumentValue::String("bravo_value".into()),
-            json_value["alpha"]["bravo"][0]
+            dash_value["alpha"]["bravo"][0]
         );
+
+        dash_value["alpha"]["bravo"] = DocumentValue::Identifier(Identifier::from(vec![1_u8; 32]));
+        assert!(matches!(
+            dash_value["alpha"]["bravo"],
+            DocumentValue::Identifier(_)
+        ))
     }
 }
