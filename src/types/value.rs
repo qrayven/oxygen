@@ -197,7 +197,9 @@ impl DocumentValue {
                             to_walk.push(v);
                             continue;
                         }
-                        Self::replace_bytes_with_array(v);
+                        if v.is_storing_bytes() {
+                            Self::replace_bytes_with_array(v);
+                        }
                     }
                 }
 
@@ -207,12 +209,16 @@ impl DocumentValue {
                             to_walk.push(v);
                             continue;
                         }
-                        Self::replace_bytes_with_array(v);
+                        if v.is_storing_bytes() {
+                            Self::replace_bytes_with_array(v);
+                        }
                     }
                 }
-                Self::Identifier(b) => *value = Self::Null,
-                Self::Bytes(b) => *value = Self::Null,
-                Self::StaticBytes(b) => *value = Self::Null,
+
+                Self::Bytes(_) | Self::StaticBytes(_) | Self::Identifier(_) => {
+                    Self::replace_bytes_with_array(value);
+                }
+
                 _ => {}
             }
         }
@@ -255,6 +261,13 @@ impl DocumentValue {
 
     pub fn is_container(&mut self) -> bool {
         matches!(self, Self::Array(_) | Self::Map(_))
+    }
+
+    pub fn is_storing_bytes(&self) -> bool {
+        matches!(
+            self,
+            Self::Bytes(_) | Self::StaticBytes(_) | Self::Identifier(_)
+        )
     }
 
     fn replace_bytes_with_array(value: &mut DocumentValue) {
@@ -358,7 +371,7 @@ impl TryFrom<serde_json::Value> for DocumentValue {
 
 #[cfg(test)]
 mod test {
-    use crate::prelude::Identifier;
+    use crate::prelude::{Bytes, Identifier, StaticBytes};
 
     use super::DocumentValue;
     use serde_json::json;
@@ -386,5 +399,44 @@ mod test {
             dash_value["alpha"]["bravo"],
             DocumentValue::Identifier(_)
         ))
+    }
+
+    #[test]
+    fn replace_bytes_types_with_arrays() {
+        let mut dash_value: DocumentValue = json!({
+            "alpha" : {
+                "bravo" : [
+                    "bravo_value"
+                ],
+                "charlie" : {
+
+                },
+                "delta" : {
+
+                },
+                "epsilon": "string_value",
+            }
+
+        })
+        .try_into()
+        .expect("no error");
+
+        dash_value["alpha"]["bravo"][0] =
+            DocumentValue::Identifier(Identifier::from(vec![1_u8; 32]));
+        dash_value["alpha"]["charlie"] = DocumentValue::Bytes(Bytes(vec![2_u8; 32]));
+
+        let replaced = dash_value.bytes_as_arrays();
+        assert!(matches!(
+            replaced["alpha"]["bravo"][0],
+            DocumentValue::Array(_)
+        ));
+        assert!(matches!(
+            replaced["alpha"]["charlie"],
+            DocumentValue::Array(_)
+        ));
+        assert!(matches!(
+            replaced["alpha"]["epsilon"],
+            DocumentValue::String(_)
+        ));
     }
 }
